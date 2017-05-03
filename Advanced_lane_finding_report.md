@@ -9,196 +9,162 @@ To find lane lines in a single image, the following steps are implemented in not
 #### 1. Calibrate camera distortion
 Camera distortion is calibrated with the chess board images provided in directory `./camera_cal/`. As many calibration images (17 out of 19) as possible are used to improve calibration accuracy. Raw chess board images are converted to Gray scale, before applying function `cv2.findChessboardCorners()` with `nx = 9` and `ny = 6`. Distortion parameters `mtx` and `dist` are save to `./camera_dist_param.p`. Please note that this is one-time calibration, and the parameters will be used for all following images. Figure below shows a raw chess board image with camera distortion and a undistorted image with such calibration.
 
-<img src="./image_results/chess_board_cal.png" alt="blur image" width=800 height="whatever">
+<img src="./output_images/chess_board_cal.png" alt="blur image" width=800 height="whatever">
 
 #### 2. Apply distortion correction to raw image
-Function `cv2.calibrateCamera()` is used to do distortion correction.
-<img src="./image_results/regular_image_cal.png" alt="blur image" width=800 height="whatever">
+Camera distortion correction with Function `cv2.calibrateCamera()` has to be applied to every image. The following figure shows an example road image before and after distortion correction
+
+<img src="./output_images/regular_image_cal.png" alt="blur image" width=800 height="whatever">
+
 #### 3. Create a thresholded binary image
 
-<img src="./image_results/gray_vs_hls.png" alt="blur image" width=800 height="whatever">
+From the undistorted image, a thresholded binary image is generated to detect edges, by combining sobel x & y, sobel magnitude & direction, and S-channel in HLS color space. The pipeline is defined in function `thresh_pipeline()`, and described in more details below. The input is the undistorted image, and the output is a binary image containing detected edges
+* a) Apply Gaussian blurring `cv2.GaussianBlur()` to remove high frequency noise with `kernel_size = 5`
+* b) Convert blurred image from RBG space to gray scale with function `cv2.cvtColor()`
+* c) Get a thresholded binary image based on sobel x & y, with `thresh_abs = (20, 255)`
+* d) Get a thresholded binary image based on sobel magnitude & direction, with `thresh_mag = (30, 255)` and `thresh_dir = (0.6, 1.1)`
+* e) Convert blurred image from RBG space to HLS space. For comparison purpose, the following plot shows gray-scale image, H-channel, L-channel, and S-channel. It can be seen that lane lines are the most visible in S-channel.
 
-<img src="./image_results/image_mask.png" alt="blur image" width=800 height="whatever">
+<img src="./output_images/gray_vs_hls.png" alt="blur image" width=800 height="whatever">
+
+* f) Get a thresholed binary image based on S-channel, with `thresh_s = (160, 255)`
+* g) Combine binary images from c), d), and f), with the following python code
+``` python
+combined_binary = np.zeros_like(sobelx_binary)
+combined_binary[(hls_binary == 1) | (((sobelx_binary == 1) & (sobely_binary == 1)) | ((sobel_mag_binary == 1) & (sobel_dir_binary == 1)))] = 1
+```
+* h) Define the region of interest mask for lane line search. the following image shows image with (left) and without (right) region mask.
+
+<img src="./output_images/image_mask.png" alt="blur image" width=800 height="whatever">
+
+* i) Apply region mask to the combined binary image from g). Table below shows the threshold values used for various binary images.
 
 | Source        | Threshold   |
 |:-------------:|:-------------:|
-| sobel x      | (20, 255)      |
+| sobel x      | (20, 255)     |
 | sobel y      | (20, 255)     |
-| sobel magnitude     | (30, 255)     |
-| sobel direction     | (0.6, 1.1)       |
+| sobel magnitude     | (30, 255)   |
+| sobel direction     | (0.6, 1.1)  |
 | S-channel     | (160, 255)        |
 
-<img src="./image_results/various_sobel_binary.png" alt="blur image" width=800 height="whatever">
+The following plot shows various thresholded binary images, combined binary images, as well as the final image with region mask applied.
+
+<img src="./output_images/various_sobel_binary.png" alt="blur image" width=800 height="whatever">
 
 #### 4. Calculate perspective transform parameters
+Perspective transform is used to convert the region of interest to 'birds-eye' view or 'top-down' view. The four source points and 4 destination points are defined below.
 ```python
-src = np.float32(
-    [[(img_size[0] / 2) - 55, img_size[1] / 2 + 100],
-    [((img_size[0] / 6) - 10), img_size[1]],
-    [(img_size[0] * 5 / 6) + 60, img_size[1]],
-    [(img_size[0] / 2 + 55), img_size[1] / 2 + 100]])
-dst = np.float32(
-    [[(img_size[0] / 4), 0],
-    [(img_size[0] / 4), img_size[1]],
-    [(img_size[0] * 3 / 4), img_size[1]],
-    [(img_size[0] * 3 / 4), 0]])
-
+vertices = np.array([(230, 700), (580, 460), (702, 460), (1080, 700)], dtype=np.int32)
+im_xsize = 1280
+im_ysize = 720
+x_offset = 290 # offset for dst points
+y_offset = 0
+dst = np.float32([[x_offset, im_ysize-y_offset], [x_offset, y_offset], [im_xsize-x_offset, y_offset], [im_xsize-x_offset, im_ysize-y_offset]])
 ```
 This resulted in the following source and destination points:
 
 | Source        | Destination   |
 |:-------------:|:-------------:|
-| 585, 460      | 320, 0        |
-| 203, 720      | 320, 720      |
-| 1127, 720     | 960, 720      |
-| 695, 460      | 960, 0        |
+| 230, 700      | 290, 720      |
+| 580, 460      | 290, 0        |
+| 702, 460      | 990, 0        |
+| 1080, 700     | 990, 720      |
+
+Transform matrix is calculated with function `cv2.getPerspectiveTransform()`, as below.
+
+```python
+M = cv2.getPerspectiveTransform(src, dst)
+invM = cv2.getPerspectiveTransform(dst, src)
+```
+`M` represents the transform matrix from original perspective to top-down perspective, and `invM` represents the inverse transform from top-down back to original perspective. Both matrixes are save to file `camera_warp_param.p` for future usage. The following plot shows original image and warped image (top-down) after perspective transform, as well as source and destination region in red dashed lines.
+
+<img src="./output_images/undist_warp.png" alt="blur image" width=800 height="whatever">
 
 #### 5. Apply perspective transform to binary image
-<img src="./image_results/undist_warp.png" alt="blur image" width=800 height="whatever">
-#### 6. Detect lane pixels and fit lane line curves
-<img src="./image_results/perspective.png" alt="blur image" width=800 height="whatever">
 
-<img src="./image_results/lane_find_1.png" alt="blur image" width=800 height="whatever">
+Perspective transform with matrix `M` is applied to every binary image from step 3, with function `cv2.warpPerspective()`, as below.
+```python
+image_warped = cv2.warpPerspective(image_thresh, M, image_thresh.shape[1::-1], flags=cv2.INTER_LINEAR)
+```
+The original binary and warped image are shown below
+
+<img src="./output_images/perspective.png" alt="blur image" width=800 height="whatever">
+
+#### 6. Detect lane pixels and fit lane line curves
+Based on the undistorted and warped binary image, lane line pixels are detected. If without any pre-knowledge of lane lines, I use the histogram method provided in Udacity class to search lane pixels in the image. There are 9 windows in total vertically, and each window is +/-100 pixels wide horizontally. After pixels are determined, a second order polynomial fitting is applied to find the best curve fitting these pixels, as below.
+
+```python
+lane_fit = np.polyfit(lane_y, lane_x, 2)
+```
+
+The following image shows detected pixels for left and right lane lines, as well as the fitted curves.
+
+<img src="./output_images/lane_find_1.png" alt="blur image" width=800 height="whatever">
+
+If pre-knowledge of lane lines are available, I am using such information to directly determine lane pixels. This could give more smooth and fast processing. The following figure shows lane pixels detection and lane line fitting under such scenario.
+
+<img src="./output_images/lane_find_3.png" alt="blur image" width=800 height="whatever">
 
 #### 7. Calculate lane curvature and vehicle position
-
+Based on the fitted lane curve, lane curvature and vehicle positon from lane center are calculated, with the method provide in class, as below.
+```python
+ym_per_pix = 30/720
+xm_per_pix = 3.7/700
+y_eval = 720
+lane_curverad = ((1 + (2*lane_fit_cir[0]*y_eval*ym_per_pix + lane_fit_cir[1])**2)**1.5) / np.absolute(2*lane_fit_cir[0])
+lane_offset = lane_fit_cir[0]*(y_eval*ym_per_pix)**2 + lane_fit_cir[1]*(y_eval*ym_per_pix) + lane_fit_cir[2]
+```
 #### 8. Warp the detected lane boundaries back
-
+With both lane lines are identified, the lane region is filled with light green, and is further transformed from top-down view to original perspective with matrix `invM`, as below.
+```python
+newwarp = cv2.warpPerspective(color_warp, invM, (image.shape[1], image.shape[0]))
+```
 #### 9. Display lane boundaries and curvature/position
-<img src="./image_results/lane_line_add.png" alt="blur image" width=800 height="whatever">
+Finally, the lane boundaries image is added on top of original image, and calculated lane curvature and vehicle positon from lane center are printed on top of that, as well. The following figure shows an example.
 
-* Compute the camera calibration matrix and distortion coefficients given a set of chessboard images.
-* Apply a distortion correction to raw images.
-* Use color transforms, gradients, etc., to create a thresholded binary image.
-* Apply a perspective transform to rectify binary image ("birds-eye view").
-* Detect lane pixels and fit to find the lane boundary.
-* Determine the curvature of the lane and vehicle position with respect to center.
-* Warp the detected lane boundaries back onto the original image.
-* Output visual display of the lane boundaries and numerical estimation of lane curvature and vehicle position.
+<img src="./output_images/lane_line_add.png" alt="blur image" width=800 height="whatever">
+
+Now, the processing to identify lane lines for a single image is completed.
 
 ### Processing over video stream frames
 
-### Conclusion
-
-
-
-##Writeup Template
-###You can use this file as a template for your writeup if you want to submit it as a markdown file, but feel free to use some other method and submit a pdf if you prefer.
-
----
-
-**Advanced Lane Finding Project**
-
-The goals / steps of this project are the following:
-
-* Compute the camera calibration matrix and distortion coefficients given a set of chessboard images.
-* Apply a distortion correction to raw images.
-* Use color transforms, gradients, etc., to create a thresholded binary image.
-* Apply a perspective transform to rectify binary image ("birds-eye view").
-* Detect lane pixels and fit to find the lane boundary.
-* Determine the curvature of the lane and vehicle position with respect to center.
-* Warp the detected lane boundaries back onto the original image.
-* Output visual display of the lane boundaries and numerical estimation of lane curvature and vehicle position.
-
-[//]: # (Image References)
-
-[image1]: ./examples/undistort_output.png "Undistorted"
-[image2]: ./test_images/test1.jpg "Road Transformed"
-[image3]: ./examples/binary_combo_example.jpg "Binary Example"
-[image4]: ./examples/warped_straight_lines.jpg "Warp Example"
-[image5]: ./examples/color_fit_lines.jpg "Fit Visual"
-[image6]: ./examples/example_output.jpg "Output"
-[video1]: ./project_video.mp4 "Video"
-
-## [Rubric](https://review.udacity.com/#!/rubrics/571/view) Points
-###Here I will consider the rubric points individually and describe how I addressed each point in my implementation.  
-
----
-###Writeup / README
-
-####1. Provide a Writeup / README that includes all the rubric points and how you addressed each one.  You can submit your writeup as markdown or pdf.  [Here](https://github.com/udacity/CarND-Advanced-Lane-Lines/blob/master/writeup_template.md) is a template writeup for this project you can use as a guide and a starting point.  
-
-You're reading it!
-###Camera Calibration
-
-####1. Briefly state how you computed the camera matrix and distortion coefficients. Provide an example of a distortion corrected calibration image.
-
-The code for this step is contained in the first code cell of the IPython notebook located in "./examples/example.ipynb" (or in lines # through # of the file called `some_file.py`).  
-
-I start by preparing "object points", which will be the (x, y, z) coordinates of the chessboard corners in the world. Here I am assuming the chessboard is fixed on the (x, y) plane at z=0, such that the object points are the same for each calibration image.  Thus, `objp` is just a replicated array of coordinates, and `objpoints` will be appended with a copy of it every time I successfully detect all chessboard corners in a test image.  `imgpoints` will be appended with the (x, y) pixel position of each of the corners in the image plane with each successful chessboard detection.  
-
-I then used the output `objpoints` and `imgpoints` to compute the camera calibration and distortion coefficients using the `cv2.calibrateCamera()` function.  I applied this distortion correction to the test image using the `cv2.undistort()` function and obtained this result:
-
-![alt text][image1]
-
-###Pipeline (single images)
-
-####1. Provide an example of a distortion-corrected image.
-To demonstrate this step, I will describe how I apply the distortion correction to one of the test images like this one:
-![alt text][image2]
-####2. Describe how (and identify where in your code) you used color transforms, gradients or other methods to create a thresholded binary image.  Provide an example of a binary image result.
-I used a combination of color and gradient thresholds to generate a binary image (thresholding steps at lines # through # in `another_file.py`).  Here's an example of my output for this step.  (note: this is not actually from one of the test images)
-
-![alt text][image3]
-
-####3. Describe how (and identify where in your code) you performed a perspective transform and provide an example of a transformed image.
-
-The code for my perspective transform includes a function called `warper()`, which appears in lines 1 through 8 in the file `example.py` (output_images/examples/example.py) (or, for example, in the 3rd code cell of the IPython notebook).  The `warper()` function takes as inputs an image (`img`), as well as source (`src`) and destination (`dst`) points.  I chose the hardcode the source and destination points in the following manner:
-
+In a video stream, the lane line in one frame will not change dramatically from that in the previous frame or several previous frames. If vary large change on lane line parameters, such as polynomial fitting coefficients or calculated curvature, it is very likely that something went wrong in lane line detection. So a sanity check is applied on the detection results, before it goes to final. Also, a smoothing function is applied to the final results, to reduce the impact of estimation error in a single frame. A `Line()` class is defined to record and track all the detection results, as below.
+```python
+class Line():
+    def __init__(self):
+        self.detected = 0 # Lane line already detected or not
+        self.frame_cnt = 0 # total frames processed
+        self.all_fit = [] # record all fitting coefficients for all frames
+        self.all_fit_cir = [] # record all fitting coefficient for all frames
+        self.all_curverad = [] # record curvature for all frames
+        self.all_offset = [] # record offset from center for all frames
+        self.current_fit = [] # current lane fitting coefficients
+        self.current_fit_cir = [] # current lane fitting coefficients
+        self.current_curverad = [] # current curvature
+        self.current_offset = [] # current offset from lane center
+        self.mis_frame = 0 # missed frames in a row
 ```
-src = np.float32(
-    [[(img_size[0] / 2) - 55, img_size[1] / 2 + 100],
-    [((img_size[0] / 6) - 10), img_size[1]],
-    [(img_size[0] * 5 / 6) + 60, img_size[1]],
-    [(img_size[0] / 2 + 55), img_size[1] / 2 + 100]])
-dst = np.float32(
-    [[(img_size[0] / 4), 0],
-    [(img_size[0] / 4), img_size[1]],
-    [(img_size[0] * 3 / 4), img_size[1]],
-    [(img_size[0] * 3 / 4), 0]])
+Here more details are discussed. These features are implemented in function `lane_fit_update()`.
 
+#### 1. Sanity check on every single frame
+The following criterion is applied:
+* a) There must be sufficient amount of pixels in the lane region (>10)
+* b) The difference between fitting coefficients in the next frame and those currently used must be small enough (<0.005 for second-order coefficient)
+* c) The calculated curvature must be a realistic number (>300 meters for highway in the sample video)
+* d) The vehicle position calculated in the next frame should have small change from current position (<50 image pixels)
+
+Violation on any of these four will label the next frame as a missing/invalid frame, and the estimation results are discarded. And current lane line will remain to the next frame.
+#### 2. Smoothing over frames
+If the lane detection on the next frame is valid, the estimation results will be taken into account by a smoothing function or alpha filtering, to update the current/active estimation, such as fitting coefficients, curvature and offset, as bellow.
+```python
+alpha = 0.9
+lane_line.current_fit = alpha * lane_line.current_fit + (1-alpha) * frame_fit
 ```
-This resulted in the following source and destination points:
+#### 3. Missing frames treatment
+As discussed before, two lane pixels detection methods, histogram search without pre-knowledge (`line.detected == 0`) and lane region search with pre-knowledge (`line.detected == 1`), are used. At the very beginning, I defined `line.detected == 0` and start histogram search from scratch. After a frame with valid lane detection is processed, I set `line.detected == 1`. When there are more than *five* missing frames happening in a row, I will reset `line.detected == 0` to start new search, since the recorded lane lines are probably not holding any more.
 
-| Source        | Destination   |
-|:-------------:|:-------------:|
-| 585, 460      | 320, 0        |
-| 203, 720      | 320, 720      |
-| 1127, 720     | 960, 720      |
-| 695, 460      | 960, 0        |
+Here's a [link to my video result](./project_video_output.mp4).
 
-I verified that my perspective transform was working as expected by drawing the `src` and `dst` points onto a test image and its warped counterpart to verify that the lines appear parallel in the warped image.
+### Discussion
 
-![alt text][image4]
-
-####4. Describe how (and identify where in your code) you identified lane-line pixels and fit their positions with a polynomial?
-
-Then I did some other stuff and fit my lane lines with a 2nd order polynomial kinda like this:
-
-![alt text][image5]
-
-####5. Describe how (and identify where in your code) you calculated the radius of curvature of the lane and the position of the vehicle with respect to center.
-
-I did this in lines # through # in my code in `my_other_file.py`
-
-####6. Provide an example image of your result plotted back down onto the road such that the lane area is identified clearly.
-
-I implemented this step in lines # through # in my code in `yet_another_file.py` in the function `map_lane()`.  Here is an example of my result on a test image:
-
-![alt text][image6]
-
----
-
-###Pipeline (video)
-
-####1. Provide a link to your final video output.  Your pipeline should perform reasonably well on the entire project video (wobbly lines are ok but no catastrophic failures that would cause the car to drive off the road!).
-
-Here's a [link to my video result](./project_video.mp4)
-
----
-
-###Discussion
-
-####1. Briefly discuss any problems / issues you faced in your implementation of this project.  Where will your pipeline likely fail?  What could you do to make it more robust?
-
-Here I'll talk about the approach I took, what techniques I used, what worked and why, where the pipeline might fail and how I might improve it if I were going to pursue this project further.  
+It takes me lots of time and effort to put everything together for this project, particularly on tuning the threshold values and processing sanity check and smoothing on video stream. The pipeline works quite well on `project_video.mp4`, and it recognizes the lane region through the video with smooth transitions. However, it doesn't work well on `challange_video.mp4`, mostly due to the changing shadow and sunlight, which gives me a hard time for edge detection. 
